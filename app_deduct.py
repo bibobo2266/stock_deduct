@@ -30,7 +30,7 @@ FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
 
 
 def _token() -> str:
-    return st.secrets.get("FINMIND_TOKEN", "")
+    return st.secrets.get("FINMIND_TOKEN", "").strip()
 
 
 def _finmind(dataset: str, **params) -> pd.DataFrame:
@@ -63,6 +63,27 @@ def stock_name_map() -> dict:
         return dict(zip(info["stock_id"], info["stock_name"]))
     except Exception:
         return {}
+
+
+@st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
+def top_liquid_stocks(n: int = 120, include_etf: bool = False) -> list:
+    """One bulk call: rank listed stocks by recent average turnover."""
+    start = (dt.date.today() - dt.timedelta(days=20)).isoformat()
+    df = _finmind("TaiwanStockPrice", start_date=start)
+    if df.empty:
+        return []
+    df = df[df["close"] > 0]
+    if include_etf:
+        mask = df["stock_id"].str.match(r"^\d{4,6}$")
+    else:
+        mask = df["stock_id"].str.match(r"^[1-9]\d{3}$")
+    df = df[mask]
+    rank = (
+        df.groupby("stock_id")["Trading_money"].mean()
+        .sort_values(ascending=False)
+        .head(n)
+    )
+    return rank.index.tolist()
 
 
 def to_weekly(df: pd.DataFrame) -> pd.DataFrame:
@@ -142,11 +163,19 @@ st.caption("扣抵值 = 未來即將被移出均線計算的舊價格。現價 >
 
 with st.sidebar:
     st.header("設定")
-    tickers_raw = st.text_area(
-        "股票代號（逗號或換行分隔）",
-        value="2330\n2317\n2454",
-        height=140,
-    )
+    mode = st.radio("標的來源", ["手動輸入", "熱門排行（自動）"], horizontal=True)
+    if mode == "手動輸入":
+        tickers_raw = st.text_area(
+            "股票代號（逗號或換行分隔）",
+            value="2330\n2317\n2454",
+            height=140,
+        )
+        top_n, include_etf = 0, False
+    else:
+        tickers_raw = ""
+        top_n = st.slider("取前 N 檔（近20日成交值排行）", 20, 200, 120, step=10)
+        include_etf = st.checkbox("含 ETF / 非四碼", value=False)
+        st.caption("每檔各一次 API 呼叫，120 檔約需 1-2 分鐘，並可能觸及 FinMind 每小時額度。")
     ma_label = st.selectbox("均線", list(MA_OPTIONS.keys()), index=5)
     horizon = st.slider("往後推估期數", 4, 60, 12)
     show_charts = st.checkbox("顯示個股圖表", value=True)
@@ -157,7 +186,16 @@ if not run:
     st.stop()
 
 freq, period = MA_OPTIONS[ma_label]
-tickers = [t.strip() for t in tickers_raw.replace(",", "\n").replace("，", "\n").split("\n") if t.strip()]
+if mode == "手動輸入":
+    tickers = [t.strip() for t in tickers_raw.replace(",", "\n").replace("，", "\n").split("\n") if t.strip()]
+else:
+    with st.spinner("取得成交值排行..."):
+        try:
+            tickers = top_liquid_stocks(top_n, include_etf)
+        except Exception as e:
+            st.error(f"排行取得失敗：{e}")
+            st.stop()
+    st.success(f"已載入前 {len(tickers)} 檔：{', '.join(tickers[:15])}{' ...' if len(tickers) > 15 else ''}")
 tickers = list(dict.fromkeys(tickers))
 
 if not tickers:
@@ -171,7 +209,7 @@ progress = st.progress(0.0)
 for i, tk in enumerate(tickers, 1):
     progress.progress(i / len(tickers), text=f"處理 {tk} ({i}/{len(tickers)})")
     try:
-        daily = fetch_daily(tk)
+        daily = fetch_daily(tk, years=5 if freq == "W" else 2)
     except Exception as e:
         st.error(f"{tk}：抓取失敗 — {e}")
         continue
@@ -244,7 +282,7 @@ if all_tables:
     st.download_button(
         "⬇️ 下載全部結果 (CSV)",
         data=buf.getvalue().encode("utf-8-sig"),
-        file_name=f"扣抵值_{ma_label}_{dt.date.today()}.csv",
+        file_name=f"扣抵值_{ma_label}_{dt.date.today():%Y%m%d}_{len(all_tables)}檔.csv",
         mime="text/csv",
         type="primary",
     )
