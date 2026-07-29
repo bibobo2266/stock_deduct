@@ -65,25 +65,26 @@ def stock_name_map() -> dict:
         return {}
 
 
+TWSE_ALL_URL = "https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL"
+
+
 @st.cache_data(ttl=60 * 60 * 6, show_spinner=False)
 def top_liquid_stocks(n: int = 120, include_etf: bool = False) -> list:
-    """One bulk call: rank listed stocks by recent average turnover."""
-    start = (dt.date.today() - dt.timedelta(days=20)).isoformat()
-    df = _finmind("TaiwanStockPrice", start_date=start)
+    """Rank 上市 stocks by latest-session turnover via TWSE open API (1 request)."""
+    r = requests.get(TWSE_ALL_URL, timeout=30, headers={"accept": "application/json"})
+    r.raise_for_status()
+    df = pd.DataFrame(r.json())
     if df.empty:
         return []
-    df = df[df["close"] > 0]
-    if include_etf:
-        mask = df["stock_id"].str.match(r"^\d{4,6}$")
-    else:
-        mask = df["stock_id"].str.match(r"^[1-9]\d{3}$")
+    for col in ("TradeValue", "ClosingPrice"):
+        df[col] = pd.to_numeric(
+            df[col].astype(str).str.replace(",", "", regex=False), errors="coerce"
+        )
+    df = df.dropna(subset=["TradeValue", "ClosingPrice"])
+    df = df[df["ClosingPrice"] > 0]
+    mask = df["Code"].str.match(r"^\d{4,6}$") if include_etf else df["Code"].str.match(r"^[1-9]\d{3}$")
     df = df[mask]
-    rank = (
-        df.groupby("stock_id")["Trading_money"].mean()
-        .sort_values(ascending=False)
-        .head(n)
-    )
-    return rank.index.tolist()
+    return df.sort_values("TradeValue", ascending=False).head(n)["Code"].tolist()
 
 
 def to_weekly(df: pd.DataFrame) -> pd.DataFrame:
@@ -173,7 +174,7 @@ with st.sidebar:
         top_n, include_etf = 0, False
     else:
         tickers_raw = ""
-        top_n = st.slider("取前 N 檔（近20日成交值排行）", 20, 200, 120, step=10)
+        top_n = st.slider("取前 N 檔（上市當日成交值排行）", 20, 200, 120, step=10)
         include_etf = st.checkbox("含 ETF / 非四碼", value=False)
         st.caption("每檔各一次 API 呼叫，120 檔約需 1-2 分鐘，並可能觸及 FinMind 每小時額度。")
     ma_label = st.selectbox("均線", list(MA_OPTIONS.keys()), index=5)
