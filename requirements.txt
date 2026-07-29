@@ -1,5 +1,6 @@
 streamlit
-FinMind
 pandas
 numpy
 plotly
+requests
+
