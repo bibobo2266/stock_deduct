@@ -8,9 +8,9 @@ import datetime as dt
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
 import plotly.graph_objects as go
-from FinMind.data import DataLoader
 
 st.set_page_config(page_title="均線扣抵值分析", page_icon="📉", layout="wide")
 
@@ -26,24 +26,28 @@ MA_OPTIONS = {
 }
 
 
-@st.cache_resource
-def get_api():
-    api = DataLoader()
-    token = st.secrets.get("FINMIND_TOKEN", "")
-    if token:
-        try:
-            api.login_by_token(api_token=token)
-        except Exception as e:
-            st.warning(f"Token 登入失敗，改用免登入模式：{e}")
-    return api
+FINMIND_URL = "https://api.finmindtrade.com/api/v4/data"
+
+
+def _token() -> str:
+    return st.secrets.get("FINMIND_TOKEN", "")
+
+
+def _finmind(dataset: str, **params) -> pd.DataFrame:
+    payload = {"dataset": dataset, "token": _token(), **params}
+    r = requests.get(FINMIND_URL, params=payload, timeout=30)
+    r.raise_for_status()
+    js = r.json()
+    if js.get("status") != 200 and js.get("msg") not in (None, "success"):
+        raise RuntimeError(js.get("msg", "FinMind error"))
+    return pd.DataFrame(js.get("data", []))
 
 
 @st.cache_data(ttl=60 * 60 * 3, show_spinner=False)
 def fetch_daily(stock_id: str, years: int = 5) -> pd.DataFrame:
-    api = get_api()
     start = (dt.date.today() - dt.timedelta(days=365 * years)).isoformat()
-    df = api.taiwan_stock_daily(stock_id=stock_id, start_date=start)
-    if df is None or df.empty:
+    df = _finmind("TaiwanStockPrice", data_id=stock_id, start_date=start)
+    if df.empty:
         return pd.DataFrame()
     df = df[["date", "open", "max", "min", "close", "Trading_Volume"]].copy()
     df.columns = ["date", "open", "high", "low", "close", "volume"]
@@ -55,7 +59,7 @@ def fetch_daily(stock_id: str, years: int = 5) -> pd.DataFrame:
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
 def stock_name_map() -> dict:
     try:
-        info = get_api().taiwan_stock_info()
+        info = _finmind("TaiwanStockInfo")
         return dict(zip(info["stock_id"], info["stock_name"]))
     except Exception:
         return {}
