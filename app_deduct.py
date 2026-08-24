@@ -1,6 +1,7 @@
 """
 均線扣抵值分析工具 (MA Roll-off Projection)
 台股 / FinMind
+v5 — 新增批次摘要層（乖離率 / 觸底期數 / 確定上彎 / 箱體寬度 + 文字解讀）
 """
 
 import io
@@ -158,6 +159,91 @@ def verdict(tbl: pd.DataFrame, cur_price: float, cur_ma: float) -> str:
     return msg
 
 
+# ---------------- v5: 摘要層 ----------------
+
+def summarize(bars: pd.DataFrame, tbl: pd.DataFrame, ma_series,
+              period: int, look: int = 12) -> dict:
+    """把單檔壓成可排序的純數字（float / bool，不含格式字串）。"""
+    close = bars["close"].to_numpy(dtype=float)
+    price = float(close[-1])
+    ma_now = float(ma_series.iloc[-1])
+
+    # 箱體：近 look 期的真實最高 / 最低（不是收盤價）
+    look = min(look, len(bars))
+    box_hi = float(bars["high"].iloc[-look:].max())
+    box_lo = float(bars["low"].iloc[-look:].min())
+
+    # 觸底期數：價格持平下，均線幾期後升到箱底 = 攤牌點
+    # （注意：不能定義成「均線追上現價」— 那在數學上恆等於 period，沒有鑑別度）
+    touch, win = None, list(close[-period:])
+    for k in range(1, period + 1):
+        win.pop(0)
+        win.append(price)
+        if sum(win) / period >= box_lo:
+            touch = k
+            break
+    touch = float(touch) if touch else float(period)
+
+    return {
+        "現價": round(price, 2),
+        "均線": round(ma_now, 2),
+        "乖離率": price / ma_now - 1,
+        "觸底期數": touch,
+        "確定上彎": bool(tbl["均線方向"].str.contains("上彎").all()),
+        "箱體寬度": (box_hi - box_lo) / box_lo,
+        "箱頂": round(box_hi, 2),
+        "箱底": round(box_lo, 2),
+    }
+
+
+def explain(r) -> str:
+    """把數字翻成中文。門檻值可自行調整。"""
+    p = []
+
+    d = r["乖離率"]
+    if d > 0.15:
+        p.append(f"乖離 +{d:.1%}（離均線太遠，追高風險大）")
+    elif d > 0.05:
+        p.append(f"乖離 +{d:.1%}（健康，有緩衝空間）")
+    elif d > 0:
+        p.append(f"乖離 +{d:.1%}（貼著均線，隨時可能跌破）")
+    else:
+        p.append(f"乖離 {d:.1%}（已在均線下方，空方格局）")
+
+    w = r["觸底期數"]
+    if w > 12:
+        p.append(f"均線 {w:.0f} 期後才升到箱底（還早，不急）")
+    elif w >= 6:
+        p.append(f"均線約 {w:.0f} 期後升到箱底（攤牌時間點）")
+    else:
+        p.append(f"均線 {w:.0f} 期內就頂到箱底（迫在眉睫）")
+
+    p.append("均線確定上彎 ✅（未來這段支撐只會越墊越高）"
+             if r["確定上彎"] else
+             "均線可能翻下 ⚠️（有扣抵值高於現價，支撐會鬆動）")
+
+    b = r["箱體寬度"]
+    if b < 0.08:
+        p.append(f"箱體 {b:.1%}（極窄，能量壓縮到極致，快突破了）")
+    elif b < 0.15:
+        p.append(f"箱體 {b:.1%}（收斂中，方向未明）")
+    else:
+        p.append(f"箱體 {b:.1%}（還在大幅震盪，沒整理完）")
+
+    p.append(f"箱頂 {r['箱頂']} / 箱底 {r['箱底']}（站上箱頂才叫真突破）")
+
+    if r["確定上彎"] and b < 0.10 and w < 8:
+        p.append("→ 【重點觀察】均線快追上、價格又縮緊，最接近攤牌")
+    elif r["確定上彎"] and d > 0.15:
+        p.append("→ 【等回檔】方向對但位置太高，等乖離縮小")
+    elif not r["確定上彎"]:
+        p.append("→ 【避開】結構在轉弱")
+    else:
+        p.append("→ 【觀望】還沒到決勝點")
+
+    return "｜".join(p)
+
+
 # ---------------- UI ----------------
 st.title("📉 均線扣抵值分析工具")
 st.caption("扣抵值 = 未來即將被移出均線計算的舊價格。現價 > 扣抵值 → 均線上彎；現價 < 扣抵值 → 均線下彎。")
@@ -180,6 +266,15 @@ with st.sidebar:
     ma_label = st.selectbox("均線", list(MA_OPTIONS.keys()), index=5)
     horizon = st.slider("往後推估期數", 4, 60, 12)
     show_charts = st.checkbox("顯示個股圖表", value=True)
+    st.caption("超過 20 檔時自動關閉圖表，只輸出摘要，避免瀏覽器卡死。")
+
+    st.divider()
+    st.subheader("摘要篩選")
+    f_up = st.checkbox("只看均線確定上彎", value=True)
+    f_box = st.slider("箱體寬度上限", 0.05, 0.40, 0.15, 0.01)
+    f_conv = st.slider("觸底期數上限", 1, 60, 12)
+    st.caption("篩選只影響上方摘要表，下方個股區仍會列出全部。")
+
     run = st.button("開始分析", type="primary", use_container_width=True)
 
 if not run:
@@ -203,8 +298,14 @@ if not tickers:
     st.error("沒有輸入任何代號。")
     st.stop()
 
+# 檔數多時強制關圖，否則 120 張 plotly 會把瀏覽器打死
+detail = show_charts and len(tickers) <= 20
+
 names = stock_name_map()
 all_tables = []
+summaries = []
+summary_slot = st.container()   # 佔位：摘要表最後才填，但顯示在最上面
+detail_slot = st.container()
 progress = st.progress(0.0)
 
 for i, tk in enumerate(tickers, 1):
@@ -228,10 +329,27 @@ for i, tk in enumerate(tickers, 1):
     cur_price = float(bars["close"].iloc[-1])
     cur_ma = float(ma.iloc[-1])
 
-    st.subheader(f"{tk} {name} — {ma_label}")
-    st.write(verdict(tbl, cur_price, cur_ma))
+    # ── 摘要（不論是否顯示細節都算）──
+    try:
+        summaries.append({"代號": tk, "名稱": name,
+                          **summarize(bars, tbl, ma, period, look=12)})
+    except Exception as e:
+        st.warning(f"{tk}：摘要計算失敗 — {e}")
 
-    if show_charts:
+    # ── CSV 明細（不論是否顯示細節都收）──
+    out = tbl.copy()
+    out.insert(0, "股票名稱", name)
+    out.insert(0, "股票代號", tk)
+    out.insert(2, "均線", ma_label)
+    all_tables.append(out)
+
+    if not detail:
+        continue
+
+    with detail_slot:
+        st.subheader(f"{tk} {name} — {ma_label}")
+        st.write(verdict(tbl, cur_price, cur_ma))
+
         hist_n = min(len(bars), period * 4)
         h = bars.tail(hist_n)
         hma = ma.tail(hist_n)
@@ -249,41 +367,75 @@ for i, tk in enumerate(tickers, 1):
                           legend=dict(orientation="h", y=1.12))
         st.plotly_chart(fig, use_container_width=True)
 
-    st.dataframe(tbl, use_container_width=True, hide_index=True)
+        st.dataframe(tbl, use_container_width=True, hide_index=True)
 
-    # paste-to-AI block
-    recent = bars.tail(12)[["date", "close"]]
-    lines = [
-        f"[{tk} {name}] {ma_label}",
-        f"現價 {cur_price:.2f} / 現在均線 {cur_ma:.2f} / {'站上' if cur_price > cur_ma else '跌破'}",
-        "近12期收盤: " + ", ".join(
-            f"{d.date()}={c:.2f}" for d, c in zip(recent['date'], recent['close'])
-        ),
-        "扣抵值表 (步數|扣抵日|扣抵值|方向|推估均線):",
-    ]
-    for _, r in tbl.iterrows():
-        lines.append(
-            f"  {r['步數']}|{r['扣抵日期']}|{r['扣抵值']}|{r['均線方向'][-2:]}|{r['推估均線']}"
-        )
-    st.text_area("📋 複製給 AI 分析", value="\n".join(lines), height=160, key=f"ai_{tk}")
-
-    out = tbl.copy()
-    out.insert(0, "股票名稱", name)
-    out.insert(0, "股票代號", tk)
-    out.insert(2, "均線", ma_label)
-    all_tables.append(out)
-    st.divider()
+        # paste-to-AI block
+        recent = bars.tail(12)[["date", "close"]]
+        lines = [
+            f"[{tk} {name}] {ma_label}",
+            f"現價 {cur_price:.2f} / 現在均線 {cur_ma:.2f} / {'站上' if cur_price > cur_ma else '跌破'}",
+            "近12期收盤: " + ", ".join(
+                f"{d.date()}={c:.2f}" for d, c in zip(recent['date'], recent['close'])
+            ),
+            "扣抵值表 (步數|扣抵日|扣抵值|方向|推估均線):",
+        ]
+        for _, r in tbl.iterrows():
+            lines.append(
+                f"  {r['步數']}|{r['扣抵日期']}|{r['扣抵值']}|{r['均線方向'][-2:]}|{r['推估均線']}"
+            )
+        st.text_area("📋 複製給 AI 分析", value="\n".join(lines), height=160, key=f"ai_{tk}")
+        st.divider()
 
 progress.empty()
 
+# ---------------- 摘要表（填回最上面的佔位）----------------
+if summaries:
+    sdf = pd.DataFrame(summaries)
+    sdf["解讀"] = sdf.apply(explain, axis=1)
+
+    m = (sdf["箱體寬度"] <= f_box) & (sdf["觸底期數"] <= f_conv)
+    if f_up:
+        m &= sdf["確定上彎"]
+    hit = sdf[m].sort_values(["箱體寬度", "觸底期數"])
+
+    with summary_slot:
+        st.subheader(f"📊 摘要 — 符合條件 {len(hit)} / {len(sdf)} 檔")
+        if hit.empty:
+            st.info("沒有符合條件的標的，可放寬左側篩選。")
+        else:
+            st.dataframe(
+                hit.drop(columns=["解讀"]),
+                use_container_width=True, hide_index=True,
+                column_config={
+                    "乖離率": st.column_config.NumberColumn(format="%.2f%%"),
+                    "箱體寬度": st.column_config.NumberColumn(format="%.2f%%"),
+                    "觸底期數": st.column_config.NumberColumn(format="%.0f"),
+                },
+            )
+            st.caption("表格排序用，逐檔文字解讀請展開下方。")
+            for _, r in hit.iterrows():
+                with st.expander(f"{r['代號']} {r['名稱']}　{r['現價']}　乖離 {r['乖離率']:.1%}"):
+                    st.write(r["解讀"].replace("｜", "\n\n"))
+
+        st.download_button(
+            "⬇️ 下載摘要 (CSV)",
+            data=sdf.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"摘要_{ma_label}_{dt.date.today():%Y%m%d}_{len(sdf)}檔.csv",
+            mime="text/csv",
+            key="dl_summary",
+        )
+        st.divider()
+
+# ---------------- 明細 CSV ----------------
 if all_tables:
     combined = pd.concat(all_tables, ignore_index=True)
     buf = io.StringIO()
     combined.to_csv(buf, index=False, encoding="utf-8-sig")
     st.download_button(
-        "⬇️ 下載全部結果 (CSV)",
+        "⬇️ 下載全部扣抵明細 (CSV)",
         data=buf.getvalue().encode("utf-8-sig"),
         file_name=f"扣抵值_{ma_label}_{dt.date.today():%Y%m%d}_{len(all_tables)}檔.csv",
         mime="text/csv",
         type="primary",
+        key="dl_detail",
     )
