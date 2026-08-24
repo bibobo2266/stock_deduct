@@ -194,15 +194,16 @@ def summarize(bars: pd.DataFrame, tbl: pd.DataFrame, ma_series,
     # 箱內位置：0 = 貼著箱底，1 = 貼著箱頂
     pos = (price - box_lo) / (box_hi - box_lo) if box_hi > box_lo else 0.5
 
-    # 狀態：寬度只講「有沒有在動」，配上位置才知道是哪一種動
-    if width <= 0.30:
-        state = "盤整中"
-    elif pos >= 0.75:
-        state = "剛噴出"      # 寬且貼頂 = 還在噴，不是箱型
-    elif pos <= 0.40:
-        state = "噴完回落"    # 寬且貼底 = 高點已過，現在在半山腰
-    else:
-        state = "劇烈震盪"    # 寬且在中間 = 上下甩，沒有結構
+    # 狀態 = 寬度 × 位置的九宮格。
+    # 只看寬度會把 31% 的亞德客和 99% 的華邦電歸成同一類；
+    # 只看寬度也會讓「窄箱貼頂」（最接近突破）藏在「盤整中」裡面。
+    hi_pos, lo_pos = pos >= 0.70, pos <= 0.35
+    if width <= 0.30:                                   # 窄
+        state = "窄箱貼頂" if hi_pos else ("窄箱貼底" if lo_pos else "盤整中")
+    elif width <= 0.60:                                 # 中
+        state = "剛噴出" if hi_pos else ("噴完回落" if lo_pos else "波動偏大")
+    else:                                               # 寬
+        state = "剛噴出" if hi_pos else ("噴完回落" if lo_pos else "劇烈震盪")
 
     return {
         "現價": round(price, 2),
@@ -247,16 +248,18 @@ def explain(r) -> str:
              "均線可能翻下 ⚠️（有扣抵值高於現價，支撐會鬆動）")
 
     b, pos, st_ = r["箱體寬度"], r["箱內位置"], r["狀態"]
-    if b < 0.08:
-        p.append(f"箱體 {b:.1%}（極窄，能量壓縮到極致，快突破了）")
-    elif b < 0.15:
-        p.append(f"箱體 {b:.1%}（收斂中，方向未明）")
-    elif b <= 0.30:
-        p.append(f"箱體 {b:.1%}（還在整理，尚未收乾）")
+    if st_ == "窄箱貼頂":
+        p.append(f"箱體 {b:.1%} 且貼在箱頂（窄幅整理又頂在上緣，最接近突破的型態）")
+    elif st_ == "窄箱貼底":
+        p.append(f"箱體 {b:.1%} 但壓在箱底（窄幅整理但撐在下緣，要守住才有戲）")
+    elif st_ == "盤整中":
+        p.append(f"箱體 {b:.1%}，價格在箱子中段（收斂中，方向未明）")
     elif st_ == "剛噴出":
         p.append(f"箱體 {b:.1%} 且貼近箱頂（這不是箱型，是剛噴出的股票，追高風險極大）")
     elif st_ == "噴完回落":
         p.append(f"箱體 {b:.1%} 但只在箱子下緣（高點已過，現在是回落段，不是盤整）")
+    elif st_ == "波動偏大":
+        p.append(f"箱體 {b:.1%}，價格在中段（波動偏大，還沒整理乾淨）")
     else:
         p.append(f"箱體 {b:.1%} 上下劇烈甩動（沒有結構可言，扣抵值判讀意義低）")
 
@@ -269,8 +272,10 @@ def explain(r) -> str:
         p.append("→ 【避開】主升段已過，均線上彎只是舊帳，不代表還能漲")
     elif st_ == "剛噴出":
         p.append("→ 【不追】正在噴的段落，扣抵值幫不上忙，等它做出箱子再看")
-    elif b < 0.10 and w < 8:
-        p.append("→ 【重點觀察】均線快追上、價格又縮緊，最接近攤牌")
+    elif st_ == "窄箱貼頂":
+        p.append("→ 【重點觀察】窄箱 + 貼頂 + 均線上彎，三個條件到齊，盯箱頂")
+    elif st_ == "窄箱貼底":
+        p.append("→ 【等訊號】結構還在但價格弱，等它站回箱子中段再談")
     elif d > 0.15:
         p.append("→ 【等回檔】方向對但位置太高，等乖離縮小")
     else:
