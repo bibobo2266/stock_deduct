@@ -270,10 +270,25 @@ with st.sidebar:
 
     st.divider()
     st.subheader("摘要篩選")
-    f_up = st.checkbox("只看均線確定上彎", value=True)
-    f_box = st.slider("箱體寬度上限", 0.05, 0.40, 0.15, 0.01)
-    f_conv = st.slider("觸底期數上限", 1, 60, 12)
-    st.caption("篩選只影響上方摘要表，下方個股區仍會列出全部。")
+    st.caption("三個條件同時成立才會列入摘要：趨勢向上 + 價格縮在一起 + 快要見真章。")
+
+    f_up = st.checkbox(
+        "只看均線確定上彎", value=False,
+        help="未來 12 期的扣抵值全部低於現價 → 均線這段期間不可能翻下。"
+             "這是最嚴的一條，一個扣抵值高於現價就出局，勾了通常只剩個位數檔。",
+    )
+    f_box = st.slider(
+        "箱體寬度上限", 0.05, 0.60, 0.25, 0.01,
+        help="近 12 期真實最高與最低的差距。越小代表價格越收縮、能量壓得越緊。"
+             "台股週線 15% 以內算很嚴，25% 起跳比較抓得到東西。",
+    )
+    f_conv = st.slider(
+        "觸底期數上限", 1, 60, 20,
+        help="價格持平下，均線還要幾期才會升到箱底 = 攤牌時間點。"
+             "週線 12 期約三個月，20 期約五個月。數字越小代表越迫在眉睫。",
+    )
+    st.caption("篩選只影響上方摘要表，下方個股區仍會列出全部。抓到 10~20 檔比較合理；"
+               "如果只剩個位數就放寬，太多就收緊。")
 
     run = st.button("開始分析", type="primary", use_container_width=True)
 
@@ -400,6 +415,17 @@ if summaries:
 
     with summary_slot:
         st.subheader(f"📊 摘要 — 符合條件 {len(hit)} / {len(sdf)} 檔")
+
+        cond = []
+        if f_up:
+            cond.append("**確定上彎 ✅** — 未來 12 期扣抵值全部低於現價 → 均線這段期間不可能翻下")
+        cond.append(f"**箱體寬度 ≤ {f_box:.0%}** — 近 12 期高低差在 {f_box:.0%} 以內 → 價格在收縮、沒亂噴")
+        cond.append(f"**觸底期數 ≤ {f_conv:.0f}** — 均線 {f_conv:.0f} 期內會升到箱底 → 攤牌時間點快到了")
+        with st.expander("目前篩選的是什麼？（點開看說明）", expanded=False):
+            st.markdown("以下條件**同時成立**才會列入：\n\n"
+                        + "\n".join(f"{i}. {c}" for i, c in enumerate(cond, 1))
+                        + "\n\n白話：趨勢向上、價格縮在一起、而且快要見真章。")
+
         if hit.empty:
             st.info("沒有符合條件的標的，可放寬左側篩選。")
         else:
