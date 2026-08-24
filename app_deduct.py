@@ -205,6 +205,12 @@ def summarize(bars: pd.DataFrame, tbl: pd.DataFrame, ma_series,
     else:                                               # 寬
         state = "剛噴出" if hi_pos else ("噴完回落" if lo_pos else "劇烈震盪")
 
+    # 邊界註記：位置離門檻不到 5 個百分點時，狀態只是門檻的巧合。
+    # 實測 高力 34.9% 判「噴完回落→避開」、禾伸堂 35.4% 判「劇烈震盪→等回檔」，
+    # 差 0.5pp 結論相反 —— 這種格子不該當成明確訊號。
+    edge = min(abs(pos - 0.35), abs(pos - 0.70)) < 0.05 or \
+           min(abs(width - 0.30), abs(width - 0.60)) < 0.05
+
     return {
         "現價": round(price, 2),
         "均線": round(ma_now, 2),
@@ -214,6 +220,7 @@ def summarize(bars: pd.DataFrame, tbl: pd.DataFrame, ma_series,
         "箱體寬度": width,
         "箱內位置": pos,
         "狀態": state,
+        "邊界": edge,
         "箱頂": round(box_hi, 2),
         "箱底": round(box_lo, 2),
     }
@@ -265,6 +272,10 @@ def explain(r) -> str:
 
     p.append(f"箱頂 {r['箱頂']} / 箱底 {r['箱底']}，現價在箱內 {pos:.0%} 位置"
              "（站上箱頂才叫真突破）")
+
+    if r.get("邊界"):
+        p.append("⚠️ 位置/寬度剛好卡在分類門檻上，下面的狀態只差幾個百分點就會翻面，"
+                 "當參考不當訊號")
 
     if not r["確定上彎"]:
         p.append("→ 【避開】結構在轉弱")
