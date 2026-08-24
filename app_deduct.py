@@ -190,13 +190,29 @@ def summarize(bars: pd.DataFrame, tbl: pd.DataFrame, ma_series,
                 break
         conv = float(c) if c else float(period)
 
+    width = (box_hi - box_lo) / box_lo
+    # 箱內位置：0 = 貼著箱底，1 = 貼著箱頂
+    pos = (price - box_lo) / (box_hi - box_lo) if box_hi > box_lo else 0.5
+
+    # 狀態：寬度只講「有沒有在動」，配上位置才知道是哪一種動
+    if width <= 0.30:
+        state = "盤整中"
+    elif pos >= 0.75:
+        state = "剛噴出"      # 寬且貼頂 = 還在噴，不是箱型
+    elif pos <= 0.40:
+        state = "噴完回落"    # 寬且貼底 = 高點已過，現在在半山腰
+    else:
+        state = "劇烈震盪"    # 寬且在中間 = 上下甩，沒有結構
+
     return {
         "現價": round(price, 2),
         "均線": round(ma_now, 2),
         "乖離率": price / ma_now - 1,
         "收斂期數": conv,
         "確定上彎": bool(tbl["均線方向"].str.contains("上彎").all()),
-        "箱體寬度": (box_hi - box_lo) / box_lo,
+        "箱體寬度": width,
+        "箱內位置": pos,
+        "狀態": state,
         "箱頂": round(box_hi, 2),
         "箱底": round(box_lo, 2),
     }
@@ -230,22 +246,33 @@ def explain(r) -> str:
              if r["確定上彎"] else
              "均線可能翻下 ⚠️（有扣抵值高於現價，支撐會鬆動）")
 
-    b = r["箱體寬度"]
+    b, pos, st_ = r["箱體寬度"], r["箱內位置"], r["狀態"]
     if b < 0.08:
         p.append(f"箱體 {b:.1%}（極窄，能量壓縮到極致，快突破了）")
     elif b < 0.15:
         p.append(f"箱體 {b:.1%}（收斂中，方向未明）")
+    elif b <= 0.30:
+        p.append(f"箱體 {b:.1%}（還在整理，尚未收乾）")
+    elif st_ == "剛噴出":
+        p.append(f"箱體 {b:.1%} 且貼近箱頂（這不是箱型，是剛噴出的股票，追高風險極大）")
+    elif st_ == "噴完回落":
+        p.append(f"箱體 {b:.1%} 但只在箱子下緣（高點已過，現在是回落段，不是盤整）")
     else:
-        p.append(f"箱體 {b:.1%}（還在大幅震盪，沒整理完）")
+        p.append(f"箱體 {b:.1%} 上下劇烈甩動（沒有結構可言，扣抵值判讀意義低）")
 
-    p.append(f"箱頂 {r['箱頂']} / 箱底 {r['箱底']}（站上箱頂才叫真突破）")
+    p.append(f"箱頂 {r['箱頂']} / 箱底 {r['箱底']}，現價在箱內 {pos:.0%} 位置"
+             "（站上箱頂才叫真突破）")
 
-    if r["確定上彎"] and b < 0.10 and w < 8:
-        p.append("→ 【重點觀察】均線快追上、價格又縮緊，最接近攤牌")
-    elif r["確定上彎"] and d > 0.15:
-        p.append("→ 【等回檔】方向對但位置太高，等乖離縮小")
-    elif not r["確定上彎"]:
+    if not r["確定上彎"]:
         p.append("→ 【避開】結構在轉弱")
+    elif st_ == "噴完回落":
+        p.append("→ 【避開】主升段已過，均線上彎只是舊帳，不代表還能漲")
+    elif st_ == "剛噴出":
+        p.append("→ 【不追】正在噴的段落，扣抵值幫不上忙，等它做出箱子再看")
+    elif b < 0.10 and w < 8:
+        p.append("→ 【重點觀察】均線快追上、價格又縮緊，最接近攤牌")
+    elif d > 0.15:
+        p.append("→ 【等回檔】方向對但位置太高，等乖離縮小")
     else:
         p.append("→ 【觀望】還沒到決勝點")
 
@@ -444,6 +471,7 @@ if summaries:
                 column_config={
                     "乖離率": st.column_config.NumberColumn(format="%.2f%%"),
                     "箱體寬度": st.column_config.NumberColumn(format="%.2f%%"),
+                    "箱內位置": st.column_config.NumberColumn(format="%.0f%%"),
                     "收斂期數": st.column_config.NumberColumn(format="%.0f"),
                 },
             )
