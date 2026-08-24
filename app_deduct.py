@@ -1,7 +1,7 @@
 """
 均線扣抵值分析工具 (MA Roll-off Projection)
 台股 / FinMind
-v5 — 新增批次摘要層（乖離率 / 觸底期數 / 確定上彎 / 箱體寬度 + 文字解讀）
+v5 — 新增批次摘要層（乖離率 / 收斂期數 / 確定上彎 / 箱體寬度 + 文字解讀）
 """
 
 import io
@@ -162,7 +162,7 @@ def verdict(tbl: pd.DataFrame, cur_price: float, cur_ma: float) -> str:
 # ---------------- v5: 摘要層 ----------------
 
 def summarize(bars: pd.DataFrame, tbl: pd.DataFrame, ma_series,
-              period: int, look: int = 12) -> dict:
+              period: int, look: int = 12, tol: float = 0.05) -> dict:
     """把單檔壓成可排序的純數字（float / bool，不含格式字串）。"""
     close = bars["close"].to_numpy(dtype=float)
     price = float(close[-1])
@@ -173,22 +173,28 @@ def summarize(bars: pd.DataFrame, tbl: pd.DataFrame, ma_series,
     box_hi = float(bars["high"].iloc[-look:].max())
     box_lo = float(bars["low"].iloc[-look:].min())
 
-    # 觸底期數：價格持平下，均線幾期後升到箱底 = 攤牌點
-    # （注意：不能定義成「均線追上現價」— 那在數學上恆等於 period，沒有鑑別度）
-    touch, win = None, list(close[-period:])
-    for k in range(1, period + 1):
-        win.pop(0)
-        win.append(price)
-        if sum(win) / period >= box_lo:
-            touch = k
-            break
-    touch = float(touch) if touch else float(period)
+    # 收斂期數：價格持平下，均線幾期後把乖離壓到 tol 以內 = 攤牌時間點
+    # 兩個試過的爛定義，留著當警惕：
+    #   「均線追上現價」→ 數學上恆等於 period（視窗填滿才相等），沒鑑別度
+    #   「均線升到箱底」→ 實測 94% 的股票都是 1（均線本來就高於近期低點）
+    target = price * (1 - tol)
+    if ma_now >= target:
+        conv = 0.0                      # 已經貼住了
+    else:
+        c, win = None, list(close[-period:])
+        for k in range(1, period + 1):
+            win.pop(0)
+            win.append(price)
+            if sum(win) / period >= target:
+                c = k
+                break
+        conv = float(c) if c else float(period)
 
     return {
         "現價": round(price, 2),
         "均線": round(ma_now, 2),
         "乖離率": price / ma_now - 1,
-        "觸底期數": touch,
+        "收斂期數": conv,
         "確定上彎": bool(tbl["均線方向"].str.contains("上彎").all()),
         "箱體寬度": (box_hi - box_lo) / box_lo,
         "箱頂": round(box_hi, 2),
@@ -210,13 +216,15 @@ def explain(r) -> str:
     else:
         p.append(f"乖離 {d:.1%}（已在均線下方，空方格局）")
 
-    w = r["觸底期數"]
-    if w > 12:
-        p.append(f"均線 {w:.0f} 期後才升到箱底（還早，不急）")
+    w = r["收斂期數"]
+    if w == 0:
+        p.append("均線已經貼到腳下（乖離 5% 內，隨時攤牌）")
+    elif w > 12:
+        p.append(f"均線要 {w:.0f} 期才追到 5% 以內（乖離太大，還早）")
     elif w >= 6:
-        p.append(f"均線約 {w:.0f} 期後升到箱底（攤牌時間點）")
+        p.append(f"均線約 {w:.0f} 期後追到 5% 以內（攤牌時間點）")
     else:
-        p.append(f"均線 {w:.0f} 期內就頂到箱底（迫在眉睫）")
+        p.append(f"均線 {w:.0f} 期內就貼上來（迫在眉睫）")
 
     p.append("均線確定上彎 ✅（未來這段支撐只會越墊越高）"
              if r["確定上彎"] else
@@ -283,9 +291,10 @@ with st.sidebar:
              "台股週線 15% 以內算很嚴，25% 起跳比較抓得到東西。",
     )
     f_conv = st.slider(
-        "觸底期數上限", 1, 60, 20,
-        help="價格持平下，均線還要幾期才會升到箱底 = 攤牌時間點。"
-             "週線 12 期約三個月，20 期約五個月。數字越小代表越迫在眉睫。",
+        "收斂期數上限", 0, 60, 20,
+        help="價格持平下，均線還要幾期才把乖離壓到 5% 以內 = 攤牌時間點。"
+             "0 代表現在就已經貼住。週線 12 期約三個月，20 期約五個月。"
+             "數字越小越迫在眉睫；乖離越大的股票這個數字越大。",
     )
     st.caption("篩選只影響上方摘要表，下方個股區仍會列出全部。抓到 10~20 檔比較合理；"
                "如果只剩個位數就放寬，太多就收緊。")
@@ -408,10 +417,10 @@ if summaries:
     sdf = pd.DataFrame(summaries)
     sdf["解讀"] = sdf.apply(explain, axis=1)
 
-    m = (sdf["箱體寬度"] <= f_box) & (sdf["觸底期數"] <= f_conv)
+    m = (sdf["箱體寬度"] <= f_box) & (sdf["收斂期數"] <= f_conv)
     if f_up:
         m &= sdf["確定上彎"]
-    hit = sdf[m].sort_values(["箱體寬度", "觸底期數"])
+    hit = sdf[m].sort_values(["箱體寬度", "收斂期數"])
 
     with summary_slot:
         st.subheader(f"📊 摘要 — 符合條件 {len(hit)} / {len(sdf)} 檔")
@@ -420,7 +429,7 @@ if summaries:
         if f_up:
             cond.append("**確定上彎 ✅** — 未來 12 期扣抵值全部低於現價 → 均線這段期間不可能翻下")
         cond.append(f"**箱體寬度 ≤ {f_box:.0%}** — 近 12 期高低差在 {f_box:.0%} 以內 → 價格在收縮、沒亂噴")
-        cond.append(f"**觸底期數 ≤ {f_conv:.0f}** — 均線 {f_conv:.0f} 期內會升到箱底 → 攤牌時間點快到了")
+        cond.append(f"**收斂期數 ≤ {f_conv:.0f}** — 均線 {f_conv:.0f} 期內把乖離壓到 5% 以內 → 攤牌時間點快到了")
         with st.expander("目前篩選的是什麼？（點開看說明）", expanded=False):
             st.markdown("以下條件**同時成立**才會列入：\n\n"
                         + "\n".join(f"{i}. {c}" for i, c in enumerate(cond, 1))
@@ -435,7 +444,7 @@ if summaries:
                 column_config={
                     "乖離率": st.column_config.NumberColumn(format="%.2f%%"),
                     "箱體寬度": st.column_config.NumberColumn(format="%.2f%%"),
-                    "觸底期數": st.column_config.NumberColumn(format="%.0f"),
+                    "收斂期數": st.column_config.NumberColumn(format="%.0f"),
                 },
             )
             st.caption("表格排序用，逐檔文字解讀請展開下方。")
