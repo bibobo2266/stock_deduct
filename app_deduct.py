@@ -197,19 +197,21 @@ def summarize(bars: pd.DataFrame, tbl: pd.DataFrame, ma_series,
     # 狀態 = 寬度 × 位置的九宮格。
     # 只看寬度會把 31% 的亞德客和 99% 的華邦電歸成同一類；
     # 只看寬度也會讓「窄箱貼頂」（最接近突破）藏在「盤整中」裡面。
-    hi_pos, lo_pos = pos >= 0.70, pos <= 0.35
-    if width <= 0.30:                                   # 窄
-        state = "窄箱貼頂" if hi_pos else ("窄箱貼底" if lo_pos else "盤整中")
-    elif width <= 0.60:                                 # 中
-        state = "剛噴出" if hi_pos else ("噴完回落" if lo_pos else "波動偏大")
-    else:                                               # 寬
-        state = "剛噴出" if hi_pos else ("噴完回落" if lo_pos else "劇烈震盪")
+    def _grid(w, p_):
+        hi, lo = p_ >= 0.70, p_ <= 0.35
+        if w <= 0.30:
+            return "窄箱貼頂" if hi else ("窄箱貼底" if lo else "盤整中")
+        if w <= 0.60:
+            return "剛噴出" if hi else ("噴完回落" if lo else "波動偏大")
+        return "剛噴出" if hi else ("噴完回落" if lo else "劇烈震盪")
 
-    # 邊界註記：位置離門檻不到 5 個百分點時，狀態只是門檻的巧合。
-    # 實測 高力 34.9% 判「噴完回落→避開」、禾伸堂 35.4% 判「劇烈震盪→等回檔」，
-    # 差 0.5pp 結論相反 —— 這種格子不該當成明確訊號。
-    edge = min(abs(pos - 0.35), abs(pos - 0.70)) < 0.05 or \
-           min(abs(width - 0.30), abs(width - 0.60)) < 0.05
+    state = _grid(width, pos)
+
+    # 邊界註記：把位置與寬度各推 ±5pp，狀態真的會翻面才標。
+    # （不能只看「離門檻多近」— 萬海寬度 62.5% 貼著 60% 門檻，但它位置 100%，
+    #   寬和中都判「剛噴出」，跨過去根本不會變，標了是誤報。）
+    edge = any(_grid(width + dw, pos + dp) != state
+               for dw in (-0.05, 0, 0.05) for dp in (-0.05, 0, 0.05))
 
     return {
         "現價": round(price, 2),
@@ -314,8 +316,23 @@ with st.sidebar:
         top_n = st.slider("取前 N 檔（上市當日成交值排行）", 20, 200, 120, step=10)
         include_etf = st.checkbox("含 ETF / 非四碼", value=False)
         st.caption("每檔各一次 API 呼叫，120 檔約需 1-2 分鐘，並可能觸及 FinMind 每小時額度。")
-    ma_label = st.selectbox("均線", list(MA_OPTIONS.keys()), index=5)
-    horizon = st.slider("往後推估期數", 4, 60, 12)
+    if st.checkbox("自訂均線週期", value=False,
+                   help="台股淺碟，週線 W20 常比 W30 貼近實況；也可以自己填任意期數。"):
+        _f = st.radio("頻率", ["週線", "日線"], horizontal=True)
+        _n = st.number_input("均線期數", 5, 250, 20 if _f == "週線" else 60)
+        freq_override = "W" if _f == "週線" else "D"
+        ma_label = f"{_f} {'W' if freq_override == 'W' else 'MA'}{_n}"
+        period_override = int(_n)
+    else:
+        # 預設 W20：台股淺碟，W30 常常慢半拍。要看更長的結構再自己切 W30/W60。
+        ma_label = st.selectbox("均線", list(MA_OPTIONS.keys()),
+                                index=list(MA_OPTIONS).index("週線 W20"))
+        freq_override = period_override = None
+
+    horizon = st.slider("往後推估期數（扣抵值要列幾期）", 4, 60, 12)
+    look_back = st.slider("箱體回看期數", 4, 26, 10,
+                          help="用近幾期的真實最高/最低算箱體。預設 10 是配 W20 抓的"
+                               "（箱體約佔均線窗口一半）。切回 W30 時可以放到 12~15。")
     show_charts = st.checkbox("顯示個股圖表", value=True)
     st.caption("超過 20 檔時自動關閉圖表，只輸出摘要，避免瀏覽器卡死。")
 
@@ -348,7 +365,10 @@ if not run:
     st.info("左側輸入代號後按「開始分析」。週線模式下 1 期 = 1 週，日線模式 1 期 = 1 個交易日。")
     st.stop()
 
-freq, period = MA_OPTIONS[ma_label]
+if period_override:
+    freq, period = freq_override, period_override
+else:
+    freq, period = MA_OPTIONS[ma_label]
 if mode == "手動輸入":
     tickers = [t.strip() for t in tickers_raw.replace(",", "\n").replace("，", "\n").split("\n") if t.strip()]
 else:
@@ -399,7 +419,7 @@ for i, tk in enumerate(tickers, 1):
     # ── 摘要（不論是否顯示細節都算）──
     try:
         summaries.append({"代號": tk, "名稱": name,
-                          **summarize(bars, tbl, ma, period, look=12)})
+                          **summarize(bars, tbl, ma, period, look=look_back)})
     except Exception as e:
         st.warning(f"{tk}：摘要計算失敗 — {e}")
 
@@ -471,7 +491,7 @@ if summaries:
         cond = []
         if f_up:
             cond.append("**確定上彎 ✅** — 未來 12 期扣抵值全部低於現價 → 均線這段期間不可能翻下")
-        cond.append(f"**箱體寬度 ≤ {f_box:.0%}** — 近 12 期高低差在 {f_box:.0%} 以內 → 價格在收縮、沒亂噴")
+        cond.append(f"**箱體寬度 ≤ {f_box:.0%}** — 近 {look_back} 期高低差在 {f_box:.0%} 以內 → 價格在收縮、沒亂噴")
         cond.append(f"**收斂期數 ≤ {f_conv:.0f}** — 均線 {f_conv:.0f} 期內把乖離壓到 5% 以內 → 攤牌時間點快到了")
         with st.expander("目前篩選的是什麼？（點開看說明）", expanded=False):
             st.markdown("以下條件**同時成立**才會列入：\n\n"
