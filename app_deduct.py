@@ -38,7 +38,7 @@ UNIVERSE_URL = f"https://raw.githubusercontent.com/{REPO}/{BRANCH}/data/universe
 
 # ---------------- 資料層 ----------------
 @st.cache_data(ttl=60 * 60 * 4, show_spinner="讀取行情資料…")
-def load_prices() -> pd.DataFrame:
+def load_prices_raw() -> pd.DataFrame:
     r = requests.get(PRICES_URL, timeout=120)
     r.raise_for_status()
     df = pd.read_parquet(io.BytesIO(r.content))
@@ -46,6 +46,16 @@ def load_prices() -> pd.DataFrame:
     # FinMind 對停牌日回傳整列 0，這些 0 會污染均線與箱體高低點
     df = df[df["close"] > 0]
     return df.sort_values(["stock_id", "date"]).reset_index(drop=True)
+
+
+def load_prices(as_of=None) -> pd.DataFrame:
+    """as_of 不為 None 時把資料截斷到該日，等同回到那天重跑一次。
+    扣抵值不產生買賣訊號，所以不需要預先算好的歷史表——單檔即時重算
+    不到 1 秒，加個日期就夠了。"""
+    df = load_prices_raw()
+    if as_of is not None:
+        df = df[df["date"] <= pd.Timestamp(as_of)]
+    return df
 
 
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
@@ -74,10 +84,10 @@ def industry_map() -> dict:
 
 
 @st.cache_data(ttl=60 * 60 * 4, show_spinner=False)
-def liquid_universe(min_wan: float = 5000, min_days: int = 250) -> list:
+def liquid_universe(min_wan: float = 5000, min_days: int = 250, as_of=None) -> list:
     """近 60 日均額超過門檻、且有足夠歷史的股票。
     流動性門檻而不是排行榜：正在收縮的股票天然不會出現在成交值前 N 名。"""
-    df = load_prices()
+    df = load_prices(as_of)
     last60 = df[df["date"] >= df["date"].max() - pd.Timedelta(days=95)]
     avg = last60.groupby("stock_id")["Trading_money"].mean()
     days = df.groupby("stock_id").size()
@@ -341,6 +351,18 @@ with st.sidebar:
                                 index=list(MA_OPTIONS).index("週線 W20"))
         freq_override = period_override = None
 
+    st.divider()
+    hist = st.checkbox("回到某一天重算", value=False,
+                       help="把資料截斷到指定日期，等同回到那天跑一次。"
+                            "用來回答「當時這檔的均線狀況如何」。")
+    as_of = None
+    if hist:
+        as_of = st.date_input("資料截止日", value=dt.date.today(),
+                              min_value=dt.date(2017, 1, 1),
+                              max_value=dt.date.today())
+        st.caption("目前 parquet 只到 2024-07 起。更早的日期要先回補還原股價。")
+    st.divider()
+
     horizon = st.slider("往後推估期數（扣抵值要列幾期）", 4, 60, 12)
     look_back = st.slider("箱體回看期數", 4, 26, 10,
                           help="用近幾期的真實最高/最低算箱體。預設 10 是配 W20 抓的"
@@ -386,14 +408,21 @@ if period_override:
 else:
     freq, period = MA_OPTIONS[ma_label]
 
-all_px = load_prices()
-st.caption(f"資料日 {all_px['date'].max():%Y-%m-%d} · 全市場 {all_px['stock_id'].nunique()} 檔")
+all_px = load_prices(as_of)
+if all_px.empty:
+    st.error("該日期之前沒有資料。")
+    st.stop()
+_d = all_px["date"].max()
+st.caption(f"資料日 {_d:%Y-%m-%d} · 全市場 {all_px['stock_id'].nunique()} 檔"
+           + (f" · ⏪ 回溯模式（截斷至 {as_of}）" if as_of else ""))
+if as_of and (_d.date() - as_of).days < -3:
+    st.warning(f"最後一筆資料是 {_d:%Y-%m-%d}，比你選的日期早。回補範圍不足。")
 
 if mode == "手動輸入":
     tickers = parse_tickers(tickers_raw)
 else:
     with st.spinner("篩選流動性母體…"):
-        tickers = liquid_universe(liq_min)
+        tickers = liquid_universe(liq_min, as_of=as_of)
     if max_n:
         tickers = tickers[:max_n]
     st.success(f"母體 {len(tickers)} 檔（60日均額 > {liq_min:,.0f} 萬）")
@@ -554,7 +583,7 @@ if summaries:
         st.download_button(
             "⬇️ 下載摘要 (CSV)",
             data=sdf.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"摘要_{ma_label}_{dt.date.today():%Y%m%d}_{len(sdf)}檔.csv",
+            file_name=f"摘要_{ma_label}_{(as_of or dt.date.today()):%Y%m%d}_{len(sdf)}檔.csv",
             mime="text/csv",
             key="dl_summary",
         )
@@ -568,7 +597,7 @@ if all_tables:
     st.download_button(
         "⬇️ 下載全部扣抵明細 (CSV)",
         data=buf.getvalue().encode("utf-8-sig"),
-        file_name=f"扣抵值_{ma_label}_{dt.date.today():%Y%m%d}_{len(all_tables)}檔.csv",
+        file_name=f"扣抵值_{ma_label}_{(as_of or dt.date.today()):%Y%m%d}_{len(all_tables)}檔.csv",
         mime="text/csv",
         type="primary",
         key="dl_detail",
